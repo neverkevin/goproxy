@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
 	"regexp"
+	"strings"
 	"sync/atomic"
+	"time"
 )
 
 // The basic proxy type. Implements http.Handler.
@@ -30,6 +33,40 @@ type ProxyHttpServer struct {
 }
 
 var hasPort = regexp.MustCompile(`:\d+$`)
+
+var allLocalIps []string
+
+func init() {
+	allLocalIps = getLocalIps()
+}
+
+func choiceLocalIp() string {
+	rand.Seed(time.Now().UnixNano())
+	cnt := len(allLocalIps)
+	if cnt < 1 {
+		return ""
+	}
+	return allLocalIps[rand.Intn(cnt)]
+}
+
+func getLocalIps() []string {
+	ret := make([]string, 0, 10)
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		log.Printf("Get local ip error: %v\n", err)
+		return ret
+	}
+	for _, addr := range addrs {
+		if ip, ok := addr.(*net.IPNet); ok && !ip.IP.IsLoopback() {
+			if ip.IP.To4() != nil && !strings.Contains(ip.IP.To4().String(), "192.168.10.1") {
+				proxy := strings.TrimSpace(ip.IP.String())
+				ret = append(ret, proxy)
+			}
+		}
+	}
+	log.Printf("get all local ip: %v\n", ret)
+	return ret
+}
 
 func copyHeaders(dst, src http.Header) {
 	for k, _ := range dst {
@@ -158,5 +195,28 @@ func NewProxyHttpServer() *ProxyHttpServer {
 			Proxy: http.ProxyFromEnvironment},
 	}
 	proxy.ConnectDial = dialerFromEnv(&proxy)
+
+	proxy.Tr.Dial = func(network, addr string) (net.Conn, error) {
+		var laddr *net.TCPAddr = nil
+		localIp := choiceLocalIp()
+		log.Println("choice a local interface:", localIp)
+		if len(localIp) > 0 {
+			temp, err := net.ResolveTCPAddr(network, localIp+":0")
+			if err != nil {
+				log.Println(err)
+			} else {
+				laddr = temp
+			}
+		}
+
+		raddr, err := net.ResolveTCPAddr(network, addr)
+		if err != nil {
+			log.Println(err)
+		}
+
+		tcpconn, err := net.DialTCP(network, laddr, raddr)
+		return tcpconn, err
+	}
+
 	return &proxy
 }
